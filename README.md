@@ -697,12 +697,214 @@ npm run docs
 npm run docs:serve
 ```
 
+## Design Philosophy
+
+@maestro/router is built on principles drawn from production orchestration systems. These aren't aspirational -- they're enforced in the architecture.
+
+### Defense in Depth
+
+No single point of failure compromises routing. Validation happens at every boundary:
+
+- **Intake**: SpawnIntent is typed and constrained (effort, cost_sensitivity, capabilities)
+- **Plugin**: Circuit breaker isolates each provider independently
+- **Fallback**: Primary fails, fallback activates transparently
+- **DirectPlugin**: Always available, zero network, pure deterministic fallback
+- **Audit**: Every decision is recorded regardless of outcome
+
+### Fail Fast, Recover Faster
+
+Errors surface immediately at the point of failure rather than propagating corrupt state. Circuit breakers trip after consecutive failures and recover via half-open probing. The goal is not zero failures -- it's minimal time and blast radius per failure.
+
+### Measure Everything, Optimize What Matters
+
+Every routing decision emits structured data: OTel spans with 14 semantic attributes, audit entries with full decision context, cost estimates, quality scores. But measurement without action is surveillance. The router is designed for closed-loop optimization: route, measure, adjust, repeat.
+
+### Prompts Are Code
+
+For systems that use prompt-driven intent detection, the routing logic deserves the same engineering rigor as source code: version control, peer review, automated testing, regression detection. A routing rule change is a behavioral change -- it alters how every subsequent request is handled.
+
+### Decision Quality Over Outcome Quality
+
+Good routing decisions can produce bad outcomes (model has a bad day). Bad routing decisions can produce good outcomes (got lucky with a cheap model). The audit trail logs the decision *process* -- why this provider was selected, what alternatives were considered, what constraints were active -- not just whether it succeeded. This enables decision audits that separate process quality from outcome quality.
+
+## Security Considerations
+
+### Credential Management
+
+- API keys are accepted via `plugin.initialize()` and stored in module-level state (one instance per process via ES module caching)
+- Keys are **never** included in error messages, rationale strings, OTel span attributes, or audit log entries
+- 4xx response bodies are redacted to prevent credential reflection attacks
+- Base URLs are validated (http/https only) before use
+- URL query parameters are stripped from error messages to prevent key leakage via query strings
+
+### Input Validation
+
+- `validateBaseUrl()` rejects non-http/https protocols
+- `safeParseFloat()` prevents NaN propagation from malformed API responses
+- SpawnIntent is typed at compile time; plugins validate capabilities at runtime
+- Plugin configuration is validated at initialization, not at selection time (fail fast)
+
+### Rate Limiting and Abuse Prevention
+
+- `KeyRateLimiter` enforces per-key sliding window quotas
+- 429 responses are parsed (`Retry-After` header: integer seconds and HTTP-date formats) and keys are blocked until cooldown expires
+- Rate limit state is independent per key -- one key hitting limits does not affect others
+
+### Audit Trail Independence
+
+Following the principle of **separation of detection and remediation**: the audit system records routing decisions (detection) but has no authority to modify routing behavior (remediation). The entity publishing quality findings has no power to prioritize or execute fixes. This structural separation prevents audit corruption.
+
+### Threat Model
+
+| Threat | Mitigation |
+|:---|:---|
+| API key exposure in logs | Keys never appear in error messages, rationale, or OTel attributes |
+| Credential reflection via 4xx bodies | Response bodies redacted for all 4xx status codes |
+| Provider impersonation via bad base URL | `validateBaseUrl()` rejects non-http/https; only configured URLs are used |
+| Cache poisoning via concurrent model refresh | Promise coalescing ensures single HTTP request per cache miss |
+| Audit log tampering | `AuditStore` interface is append-only; in-memory store has no delete API |
+| Rate limit bypass | Per-key enforcement; `canProceed()` checks both window quota and 429 cooldown |
+| NaN propagation from malformed API data | `safeParseFloat()` returns 0 for unparseable values |
+
+### Recommendations for Production
+
+- Store API keys in environment variables or a secrets manager -- never in source code or config files
+- Implement a custom `AuditStore` backed by an append-only database with retention policies
+- Enable OTel tracing with a production-grade collector (Jaeger, Tempo, Datadog) for full request correlation
+- Set up alerting on circuit breaker state transitions (closed -> open) and audit store write failures
+- Rotate API keys periodically and use `limiter.remove(oldKey)` to clear stale rate limit state
+
+## Cost Optimization
+
+### Cost-Quality Tradeoff
+
+The router treats cost optimization as an explicit dimension of every routing decision, not an afterthought. Every `SpawnIntent` carries a `cost_sensitivity` field that directly influences model selection:
+
+| Sensitivity | Behavior | Use Case |
+|:---|:---|:---|
+| `low` | Prefer quality over cost. Strong models selected even when cheaper alternatives qualify. | Critical tasks, customer-facing output, complex reasoning |
+| `normal` | Balanced. Effort-based tier ordering with cost as a tiebreaker. | General workloads |
+| `high` | Cheapest qualifying model wins. Quality is sacrificed for cost. | Bulk processing, internal tooling, non-critical tasks |
+
+### Off-Peak Pricing Intelligence
+
+Providers offer time-based discounts that the router exploits automatically. The Maestro plugin maintains provider-specific off-peak windows:
+
+| Provider | Off-Peak Window (UTC) | Discount | Notes |
+|:---|:---|:---|:---|
+| DeepSeek | 16:30 -- 00:30 | 50% | Midnight-crossing logic handles the UTC day boundary |
+
+During off-peak windows, the effective cost of qualifying models is reduced by the discount factor, making them more competitive in cost-quality scoring. The midnight-crossing logic uses an OR condition (`currentMinutes >= startMinutes || currentMinutes < endMinutes`) to correctly handle windows that span midnight.
+
+### Cost Scoring
+
+The Maestro plugin computes a composite score that weights cost and quality based on sensitivity:
+
+```
+composite = (quality_weight * quality_score) - (cost_weight * normalized_cost)
+```
+
+Cost weights by sensitivity:
+
+| Sensitivity | Quality Weight | Cost Weight |
+|:---|---:|---:|
+| `low` | 0.8 | 0.2 |
+| `normal` | 0.5 | 0.5 |
+| `high` | 0.2 | 0.8 |
+
+### Provider Pricing Dimensions
+
+The v1.4 spec documents 6 pricing dimensions across 12+ providers:
+
+1. **Batch API discounts** -- Anthropic (50%), OpenAI (50%), Google (50%) for async workloads
+2. **Prompt caching** -- Anthropic (90% off cached), OpenAI (50% off), Google (75% off)
+3. **Time-based pricing** -- DeepSeek off-peak (50% off), others TBD
+4. **Service tiers** -- Anthropic Build/Scale/Enterprise with volume discounts
+5. **Provisioned capacity** -- AWS Bedrock, Azure OpenAI reserved throughput
+6. **Gateway markups** -- OpenRouter (0%), Portkey (0%), Requesty (varies)
+
+### Cost Tracking Habits
+
+Following the principle of "track burn rate daily":
+
+- Use the audit trail to monitor API spend per provider, per model, per caller
+- Set up alerts when daily spend exceeds thresholds
+- Compare estimated costs (from routing decisions) against actual invoices to detect drift
+- Use `cost_sensitivity: 'high'` for non-critical workloads to reduce spend without manual intervention
+
+## Roadmap
+
+### v0.2.0 -- Provider Expansion
+
+- **Anthropic direct plugin** -- Bypass aggregators for Anthropic-only deployments with Messages API
+- **Azure OpenAI plugin** -- Enterprise customers with Azure-managed OpenAI endpoints
+- **AWS Bedrock plugin** -- Cross-model routing through Bedrock's unified API
+- **Google Vertex AI plugin** -- Gemini routing through Google Cloud
+- **DeepSeek plugin** -- Direct integration for off-peak pricing exploitation
+- **Mistral plugin** -- Mistral La Plateforme direct API
+- **Groq plugin** -- Ultra-low-latency inference for latency-sensitive routing
+- **Together AI plugin** -- Open-source model hosting with competitive pricing
+- **Fireworks AI plugin** -- Optimized open-source model inference
+- **Ollama plugin** -- Local model routing for air-gapped and development environments
+
+### v0.3.0 -- Closed-Loop Optimization
+
+- **Feedback loop** -- Execution outcomes (latency, actual cost, success/failure, quality score) feed back into routing weights automatically
+- **Dynamic pricing refresh** -- Poll provider pricing APIs hourly instead of using static data
+- **Latency-aware routing** -- Track p50/p95/p99 latency per provider per model and factor into selection
+- **Token budget enforcement** -- Reject or downgrade requests that would exceed per-user/per-org token budgets
+- **A/B routing** -- Split traffic between providers to continuously evaluate alternatives
+- **Prompt caching hints** -- Detect cache-eligible requests and route to providers with caching discounts
+
+### v0.4.0 -- Advanced Intelligence
+
+- **Context window management** -- Estimate input tokens and route to models with sufficient context windows
+- **Multi-region routing** -- Geographic preference in SpawnIntent, route based on latency + cost + availability
+- **Batch API routing** -- Detect async-eligible workloads and route to batch endpoints for 50% cost savings
+- **Canary deployments** -- Gradually shift traffic to new providers/models with automatic rollback on quality regression
+- **Custom scoring functions** -- User-defined scoring that plugs into the cost-quality evaluation pipeline
+
+### v0.5.0 -- Benchmarking and Cost Verification
+
+- **Provider cost benchmarking suite** -- Automated tests that route identical workloads through each provider and compare actual billed costs against estimated costs. Detect pricing drift before it hits production budgets.
+- **Routing decision benchmarks** -- Measure routing latency (p50/p95/p99) across plugin counts, model catalog sizes, and habit table sizes. Regression-test against baseline on every CI run.
+- **Cost accuracy scoring** -- Track `estimated_cost` vs `actual_cost` per provider per model over time. Surface providers where estimates drift >10% from reality.
+- **A/B cost comparison** -- Split identical traffic across two providers and compare total spend, latency, and success rate. Automated reports with statistical significance testing.
+- **Chaos cost testing** -- Simulate provider pricing changes (rate increases, discount removal, new tiers) and verify the router re-optimizes correctly without manual intervention.
+- **Load testing harness** -- Sustained throughput testing (1K, 10K, 100K routing decisions/sec) to find the ceiling before the Rust port. Profile memory, CPU, and GC pressure.
+- **Provider SLA verification** -- Automated checks against provider-advertised uptime, latency, and rate limits. Compare marketing claims against observed behavior.
+- **Cost optimization regression tests** -- Golden-file tests that assert: "given this model catalog and these 100 intents, the total estimated cost must not exceed $X." Catch regressions where routing changes silently increase spend.
+
+### v1.0.0 -- Production Hardening
+
+- **Rust core** -- Port the hot path (intent matching, cost scoring, model filtering) to Rust via napi-rs for sub-microsecond routing decisions. The plugin interface stays in TypeScript; the scoring engine compiles to native. Target: <100us p99 for habit matching, <500us p99 for full routing decisions.
+- **Persistent rate limiter** -- Redis-backed sliding window for distributed rate limiting across process boundaries
+- **Schema validation** -- JSONSchema-based plugin config validation at `initialize()` time
+- **Chaos testing suite** -- Automated provider failure injection (latency, errors, rate limits) to verify resilience
+- **SLA monitoring** -- Track routing SLA compliance (availability, latency, cost accuracy) with alerting
+
+### Potential Rust Port
+
+The router's architecture is designed for incremental native compilation:
+
+| Component | Port Priority | Rationale |
+|:---|:---|:---|
+| Habit matching (keyword scan) | High | Hot path, pure CPU, no I/O. Regex/keyword matching in Rust is 10-100x faster. |
+| Cost-quality scoring | High | Numeric computation over model catalogs. SIMD-friendly. |
+| SemanticRouter (TF-IDF) | Medium | Vector math, cosine similarity. Benefits from native BLAS. |
+| Model capability filtering | Medium | Array filtering with predicate evaluation. Cache-friendly in Rust. |
+| Plugin interface | Low | Async I/O bound (HTTP calls). TypeScript is fine here. |
+| OTel instrumentation | None | Already zero-cost when disabled. OTel SDK is JS-native. |
+| Audit trail | None | I/O bound (database writes). No benefit from native. |
+
+The napi-rs bridge would expose a `NativeRouter` class that handles the scoring/matching hot path while delegating plugin I/O to the existing TypeScript plugins. This is the same pattern used by [swc](https://github.com/swc-project/swc) (Rust core, JS API) and [Turbopack](https://github.com/vercel/turbopack).
+
 ## Contributing
 
 ### Prerequisites
 
 - Node.js >= 20
-- npm or pnpm
+- npm
 
 ### Development
 
@@ -732,15 +934,90 @@ npm run build
 npm run docs
 ```
 
+### Project Structure
+
+```
+src/
+  index.ts                  # barrel exports
+  router.ts                 # main Router class
+  registry.ts               # plugin lifecycle manager
+  types.ts                  # core type definitions
+  errors.ts                 # error hierarchy
+  habits.ts                 # habit matcher
+  resilience.ts             # circuit breaker + retry
+  tracing.ts                # OTel instrumentation
+  http.ts                   # undici HTTP utilities
+  audit.ts                  # audit trail
+  rate-limiter.ts           # per-key rate limiter
+  score-bridge.ts           # score engine bridge
+  plugins/
+    registry.ts             # plugin loader registry
+    direct.ts               # offline fallback
+    maestro.ts              # score-informed routing
+    openrouter.ts           # OpenRouter aggregator
+    requesty.ts             # Requesty gateway
+    portkey.ts              # Portkey gateway
+    litellm.ts              # LiteLLM proxy/SDK
+    mock.ts                 # test plugin
+  algorithms/
+    semantic-router.ts      # TF-IDF intent classification
+    routellm-mf.ts          # cost-quality threshold routing
+  __tests__/
+    unit/                   # 14 unit test files
+    contract/               # plugin contract test suite
+```
+
+### Adding a New Plugin
+
+1. Create `src/plugins/your-plugin.ts` implementing `RouterPlugin`
+2. Add a loader entry in `src/plugins/registry.ts`
+3. Export from `src/index.ts`
+4. Run the contract test suite against your plugin
+5. Add plugin-specific unit tests in `src/__tests__/unit/`
+6. Document in the Plugins table in this README
+
+Every plugin must pass the contract test suite (`src/__tests__/contract/router-contract.test.ts`), which validates:
+
+- `select()` returns valid `ModelSelection` for all effort/cost combinations
+- `models()` returns a non-empty `ModelCapability[]`
+- `healthy()` returns a boolean
+- Required capabilities in the intent are respected
+- `initialize()` and `dispose()` do not throw
+
+### Code Quality Standards
+
+- **Test behavior, not implementation** -- test public interfaces and observable outcomes
+- **Arrange-act-assert** -- every test follows this structure
+- **One variable at a time** -- when optimizing routing logic, change one parameter and measure
+- **Explicit trade-offs** -- every PR that changes routing behavior must document what it gains, what it costs, and what breaks if wrong
+- **No silent failures** -- errors are surfaced, logged, or explicitly caught with documented rationale
+
 ### Versioning
 
 This project uses [Changesets](https://github.com/changesets/changesets) for versioning:
 
 ```bash
-npm run changeset     # create a changeset
-npm run version       # apply changesets and bump versions
+npm run changeset     # create a changeset describing your change
+npm run version       # apply changesets and bump version
 npm run release       # build and publish to npm
 ```
+
+### Pull Request Process
+
+1. Create a feature branch from `main`
+2. Make your changes with tests
+3. Run `npm run typecheck && npm test && npm run build`
+4. Create a changeset: `npm run changeset`
+5. Open a PR with a clear description of what changed and why
+6. CI must pass (typecheck + test on Node 20/22)
+
+## Acknowledgments
+
+- [cockatiel](https://github.com/connor4312/cockatiel) -- Circuit breaker and retry policies
+- [undici](https://github.com/nodejs/undici) -- HTTP/1.1 client
+- [Aurelio AI Semantic Router](https://github.com/aurelio-labs/semantic-router) -- Inspiration for the SemanticRouter algorithm
+- [LMSYS RouteLLM](https://github.com/lm-sys/RouteLLM) -- Inspiration for the CostQualityRouter algorithm
+- [Release It!](https://pragprog.com/titles/mnee2/release-it-second-edition/) by Michael Nygard -- Stability patterns (circuit breakers, bulkheads, timeouts)
 
 ## License
 
