@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Intelligent multi-provider routing for AI orchestration",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "sideEffects": false,
   "repository": {
     "type": "git",

@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@maestro/router?style=flat-square)](https://www.npmjs.com/package/@maestro/router)
 [![CI](https://img.shields.io/github/actions/workflow/status/andrewdever/maestro-router/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/andrewdever/maestro-router/actions)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen?style=flat-square)](https://nodejs.org)
 
 Receives a `SpawnIntent` from the orchestrator and resolves it to a concrete `ModelSelection` through a five-part chain: **router - provider - harness - model - config**. Self-contained with zero dependencies on the rest of the Maestro platform -- publish and use it standalone.
@@ -13,7 +13,8 @@ Receives a `SpawnIntent` from the orchestrator and resolves it to a concrete `Mo
 
 | Document | Description |
 |:---|:---|
-| [README.md](./README.md) | Overview, quick start, and feature guide (this file) |
+| [README.md](./README.md) | Overview, features, and usage guide (this file) |
+| [docs/QUICKSTART.md](./docs/QUICKSTART.md) | Get routing in under 5 minutes -- 7 progressive examples |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, PR process, roadmap, known debt |
 | [docs/API.md](./docs/API.md) | Complete API reference for all exported classes and functions |
 | [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) | Full configuration guide with presets and examples |
@@ -1034,4 +1035,4 @@ npm run release       # build and publish to npm
 
 ## License
 
-[MIT](./LICENSE)
+[Apache 2.0](./LICENSE)
