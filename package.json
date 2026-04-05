@@ -1,0 +1,87 @@
+{
+  "name": "@maestro/router",
+  "version": "0.1.0",
+  "description": "Intelligent multi-provider routing for AI orchestration",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andrewdever/maestro-router.git"
+  },
+  "homepage": "https://github.com/andrewdever/maestro-router#readme",
+  "bugs": {
+    "url": "https://github.com/andrewdever/maestro-router/issues"
+  },
+  "keywords": [
+    "ai",
+    "routing",
+    "llm",
+    "orchestration",
+    "multi-provider",
+    "openrouter",
+    "portkey",
+    "litellm",
+    "anthropic",
+    "openai",
+    "google",
+    "circuit-breaker",
+    "resilience"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "docs": "typedoc",
+    "docs:serve": "typedoc && npx serve docs",
+    "prepublishOnly": "npm run build",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "npm run build && changeset publish"
+  },
+  "dependencies": {
+    "cockatiel": "^3.2.1",
+    "undici": "^7.10.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.12",
+    "@eslint/js": "^9.25.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@types/node": "^22.15.0",
+    "@vitest/coverage-v8": "^4.1.2",
+    "eslint": "^9.25.0",
+    "typedoc": "^0.28.0",
+    "typedoc-plugin-markdown": "^4.6.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.30.0",
+    "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
