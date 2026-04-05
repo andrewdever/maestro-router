@@ -4,6 +4,20 @@ Get routing in under 5 minutes.
 
 ---
 
+## What you're building
+
+The router is a **decision engine**. You tell it what you need ("deep thinking, code capability, prefer Anthropic"), and it tells you which provider and model to use. That's it.
+
+It never touches your prompts. It never sees your responses. It doesn't proxy traffic. Your orchestrator calls the provider directly -- the router just tells it who to call.
+
+```
+Your code  ---SpawnIntent--->  Router  ---ModelSelection--->  Your code  ---API call--->  Provider
+```
+
+Everything below follows that pattern: describe what you need, get a recommendation, act on it yourself.
+
+---
+
 ## 1. Install
 
 ```bash
@@ -45,7 +59,7 @@ await router.dispose();
 
 ## 3. Production Routing (With API Key)
 
-Use a provider plugin for live model selection:
+Use a provider plugin for **smarter** model selection. The API key gives the plugin access to the provider's model catalog (pricing, availability) -- it does NOT route your AI traffic through that provider:
 
 ```typescript
 import { Router } from '@maestro/router';

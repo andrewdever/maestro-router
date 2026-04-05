@@ -23,7 +23,9 @@ Last updated: 2026-04-05
 
 ## 1. Security Model
 
-@maestro/router operates as a decision layer between the orchestrator and provider APIs. It does not execute model calls, store conversation data, or process user content. Its security surface is:
+@maestro/router is a **pure decision engine** -- it tells your orchestrator which provider and model to use, then gets out of the way. It never executes model calls, never sees prompts or completions, never stores conversation data, and never proxies provider traffic. Plugins that query external services (OpenRouter, Portkey, LiteLLM) do so only to read model catalog data -- pricing, availability, capabilities -- not to route AI requests.
+
+This means the router has **zero access to sensitive content** by design. Its security surface is limited to:
 
 - **API credentials** -- plugin API keys passed at initialization
 - **Routing decisions** -- which provider/model is selected for each intent

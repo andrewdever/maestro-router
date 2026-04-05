@@ -26,7 +26,7 @@ This document covers the primary API surface. For complete type signatures, see 
 
 ## 1. Router
 
-The main entry point. Orchestrates the full routing flow: habits, registry, resilience, plugin selection, audit.
+The main entry point. A pure decision engine that takes a `SpawnIntent` (what you need) and returns a `ModelSelection` (where to send it). Never touches prompts, responses, or provider traffic. Orchestrates the full decision flow: habits, registry, resilience, plugin selection, audit.
 
 ### `new Router(options?)`
 

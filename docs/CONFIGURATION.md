@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This document covers all configuration options for @maestro/router.
+This document covers all configuration options for @maestro/router. The router is a pure decision engine -- everything you configure here affects **which model is recommended**, not how requests are executed. Your orchestrator handles execution independently.
 
 ---
 

@@ -1,13 +1,22 @@
 # @maestro/router
 
-**Intelligent multi-provider routing for AI orchestration.**
+**A decision engine for AI model routing.**
 
 [![npm version](https://img.shields.io/npm/v/@maestro/router?style=flat-square)](https://www.npmjs.com/package/@maestro/router)
 [![CI](https://img.shields.io/github/actions/workflow/status/andrewdever/maestro-router/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/andrewdever/maestro-router/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square)](./LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen?style=flat-square)](https://nodejs.org)
 
-Receives a `SpawnIntent` from the orchestrator and resolves it to a concrete `ModelSelection` through a five-part chain: **router - provider - harness - model - config**. Self-contained with zero dependencies on the rest of the Maestro platform -- publish and use it standalone.
+You describe what you need. The router tells you where to send it.
+
+```
+"I need deep thinking, code capability, prefer Anthropic"
+→ openrouter-anthropic-api-claude-opus-4-6-effort:deep
+```
+
+That's all it does. One function call, one answer. The router never touches your prompts, never sees your responses, never proxies traffic. It's a pure decision layer -- a routing table for AI models that knows about pricing, availability, capabilities, circuit breaker state, and your team's habits.
+
+Your orchestrator stays in control of execution. The router just answers the question: **who should handle this?**
 
 ## Documentation
 
@@ -25,10 +34,54 @@ Receives a `SpawnIntent` from the orchestrator and resolves it to a concrete `Mo
 
 ---
 
+## How It Works
+
+The router is a **pure decision engine**. It takes a description of what you need (a `SpawnIntent`) and returns a recommendation of where to send it (a `ModelSelection`). That's the entire contract.
+
+```
+Your code                    @maestro/router                   Your code
+   |                              |                               |
+   |   SpawnIntent                |                               |
+   |   { effort, cost, caps }  -->|                               |
+   |                              |  consult plugin               |
+   |                              |  (check pricing, models,      |
+   |                              |   availability, habits)       |
+   |                              |                               |
+   |                  ModelSelection                               |
+   |              <-- { provider, model, cost }                    |
+   |                              |                               |
+   |   You make the API call yourself  --------------------------->|
+   |   (Anthropic, OpenAI, Google, etc.)                          |
+```
+
+**What the router does:** Selects the best provider + model for your task based on capabilities, cost, quality, availability, circuit breaker state, and team habits.
+
+**What the router does NOT do:** Proxy requests, touch prompts, see responses, manage API keys for execution, or make any provider API calls on your behalf. Your orchestrator calls the provider directly. The router just tells it who to call.
+
+### What plugins actually do
+
+Plugins provide **selection intelligence** -- they help the router make better decisions by bringing different data sources and strategies:
+
+| Plugin | Intelligence Source | What It Provides |
+|:---|:---|:---|
+| Direct | Static catalog compiled at release time | Deterministic offline selection -- zero network |
+| Maestro | Quality scores + off-peak pricing windows | Cost-quality optimization with time-aware scoring |
+| OpenRouter | Live model catalog from openrouter.ai `/models` API | Fresh pricing and availability data for 200+ models |
+| Requesty | Live model catalog from requesty.ai | Fresh data with failover awareness |
+| Portkey | Live catalog from portkey.ai (self-hostable) | Enterprise catalog with virtual key support |
+| LiteLLM | Catalog from LiteLLM proxy or SDK | Coverage for 2500+ models via proxy |
+| Mock | Pre-configured test data | Deterministic responses for testing |
+
+No plugin routes traffic through its service. When you configure the OpenRouter plugin, the router queries OpenRouter's model catalog API to learn about pricing and availability -- but the actual API call to Claude or GPT still goes directly from your code to the provider. The plugin makes the router smarter. It doesn't sit in the request path.
+
+---
+
 ## Features
 
+- **Pure decision engine** -- returns a recommendation, never touches your requests or responses
 - **Intent-based routing** -- tasks declare capabilities and constraints, never model names
 - **7 shipped plugins** -- Direct, Maestro, OpenRouter, Requesty, Portkey, LiteLLM, Mock
+- **Selection intelligence** -- plugins query external catalogs for fresher data, not traffic routing
 - **Habit matching** -- local-first short-circuit routing, zero tokens, zero API calls
 - **Resilience** -- per-plugin circuit breakers, exponential backoff retry (via cockatiel)
 - **Cost-quality optimization** -- RouteLLM-inspired threshold routing with complexity scoring
@@ -118,42 +171,50 @@ Use `toSlug(selection)` to generate slugs from any `ModelSelection`.
 
 ### Routing Flow
 
+The router receives an intent, makes a decision, and returns it. No traffic flows through the router.
+
 ```
-                         SpawnIntent
-                             |
-                   +---------+---------+
-                   |   Habit Matcher   |
-                   +---+----------+----+
-                       |          |
-                    matched    no match
-                       |          |
-              return immediately   |
-             (zero tokens)        |
-                             +----+-----+
-                             |  Plugin  |
-                             | Registry |
-                             +----+-----+
-                                  |
-                    +-------------+-------------+
-                    |                           |
-               primary plugin            fallback plugin
-               (e.g. maestro)           (e.g. direct)
-                    |                           |
-                    +-------------+-------------+
-                                  |
-                        +---------+---------+
-                        | Resilience Policy |
-                        | (retry + breaker) |
-                        +---------+---------+
-                                  |
-                          plugin.select()
-                                  |
-                        +---------+---------+
-                        |  ModelSelection   |
-                        |  + canonical slug |
-                        |  + audit entry    |
-                        |  + OTel span      |
-                        +-------------------+
+  Your orchestrator                    @maestro/router
+       |                                    |
+       |  SpawnIntent                       |
+       |  { effort, cost, requires }  ----->|
+       |                                    |
+       |                          +---------+---------+
+       |                          |   Habit Matcher   |
+       |                          +---+----------+----+
+       |                              |          |
+       |                           matched    no match
+       |                              |          |
+       |                   return immediately     |
+       |                  (zero tokens)          |
+       |                                    +----+-----+
+       |                                    |  Plugin  |
+       |                                    | Registry |
+       |                                    +----+-----+
+       |                                         |
+       |                           +-------------+-------------+
+       |                           |                           |
+       |                      primary plugin            fallback plugin
+       |                           |                           |
+       |                           +-------------+-------------+
+       |                                         |
+       |                               +---------+---------+
+       |                               | Resilience Policy |
+       |                               | (retry + breaker) |
+       |                               +---------+---------+
+       |                                         |
+       |                                 plugin.select()
+       |                                         |
+       |                               +---------+---------+
+       |           ModelSelection       |  ModelSelection   |
+       |  <----  { provider, model,     |  + canonical slug |
+       |           cost, rationale }    |  + audit entry    |
+       |                                |  + OTel span      |
+       |                                +-------------------+
+       |
+       |  You call the provider directly
+       |  (Anthropic, OpenAI, Google, etc.)
+       v
 ```
 
 ### Effort Defaults
@@ -170,15 +231,19 @@ Each effort level maps to default execution parameters before model-specific cla
 
 ### Shipped Plugins
 
-| Plugin       | ID           | Description                                             | API Key Required | Config Keys                                  |
+Every plugin answers the same question -- "which model should handle this?" -- but each one brings different intelligence to the answer.
+
+| Plugin       | ID           | Intelligence Strategy                                   | API Key Required | Config Keys                                  |
 |:-------------|:-------------|:--------------------------------------------------------|:-----------------|:---------------------------------------------|
-| Direct       | `direct`     | Offline-first, zero-config, air-gapped fallback         | No               | --                                           |
-| Maestro      | `maestro`    | Quality-informed routing with score bridge integration   | No               | `off_peak_enabled`, `models`, `score_bridge` |
-| OpenRouter   | `openrouter` | Multi-provider aggregator, 200+ models, single API key  | Yes              | `api_key`, `base_url`                        |
-| Requesty     | `requesty`   | Smart routing with sub-20ms failover                    | Yes              | `api_key`, `base_url`                        |
-| Portkey      | `portkey`    | Open-source AI gateway, 250+ models, 45+ providers     | Yes              | `api_key`, `base_url`, `virtual_key`         |
-| LiteLLM      | `litellm`    | Universal gateway, 2500+ models, proxy or SDK mode      | Yes (proxy)      | `api_key`, `base_url`, `mode`                |
-| Mock         | `mock`       | Deterministic test router with preconfigured responses  | No               | `responses`                                  |
+| Direct       | `direct`     | Static catalog, deterministic selection, zero network    | No               | --                                           |
+| Maestro      | `maestro`    | Quality-cost composite scoring with off-peak awareness   | No               | `off_peak_enabled`, `models`, `score_bridge` |
+| OpenRouter   | `openrouter` | Live catalog from openrouter.ai for fresh pricing data   | Yes              | `api_key`, `base_url`                        |
+| Requesty     | `requesty`   | Live catalog from requesty.ai with failover awareness    | Yes              | `api_key`, `base_url`                        |
+| Portkey      | `portkey`    | Catalog from portkey.ai gateway (self-hostable)          | Yes              | `api_key`, `base_url`, `virtual_key`         |
+| LiteLLM      | `litellm`    | Catalog from LiteLLM proxy, 2500+ models                | Yes (proxy)      | `api_key`, `base_url`, `mode`                |
+| Mock         | `mock`       | Pre-configured responses for deterministic testing       | No               | `responses`                                  |
+
+> **Note:** No plugin proxies traffic through its service. Plugins that query external APIs (OpenRouter, Requesty, Portkey, LiteLLM) do so to gather model catalog data -- pricing, availability, capabilities. Your actual AI requests go directly from your code to the provider.
 
 ### Configuring Plugins
 
@@ -714,6 +779,17 @@ npm run docs:serve
 ## Design Philosophy
 
 @maestro/router is built on principles drawn from production orchestration systems. These aren't aspirational -- they're enforced in the architecture.
+
+### Selection, Not Proxy
+
+The router is a decision function, not a middleware layer. It never sits in the request path. This is a deliberate architectural choice with concrete consequences:
+
+- **Zero added latency** on AI requests. The routing decision happens before the API call, not during it.
+- **Zero data exposure**. The router never sees prompts, completions, or tokens. It has no access to sensitive content.
+- **Zero vendor lock-in on execution**. You call providers directly with your own SDKs, your own retry logic, your own auth. Switch execution infrastructure without touching the router.
+- **Plugins are intelligence sources, not gateways**. An OpenRouter plugin queries openrouter.ai for fresh model data. It doesn't send your traffic through OpenRouter. A Portkey plugin reads the Portkey catalog. Your requests never touch Portkey's servers (unless you separately choose to use Portkey as your execution gateway -- that's your orchestrator's concern, not the router's).
+
+This separation means the router can be wrong with minimal blast radius. A bad routing decision sends a task to a suboptimal model. A bad proxy corrupts or drops the actual request.
 
 ### Defense in Depth
 

@@ -1,22 +1,45 @@
 # Plugin Guide
 
-This document covers the shipped plugins, how to configure them, and how to build your own.
+This document covers what plugins do, how the shipped plugins work, and how to build your own.
 
 ---
 
 ## Table of Contents
 
-1. [Plugin Architecture](#1-plugin-architecture)
-2. [Shipped Plugins](#2-shipped-plugins)
-3. [Plugin Comparison Matrix](#3-plugin-comparison-matrix)
-4. [Decision Matrix](#4-decision-matrix)
-5. [Plugin Development](#5-plugin-development)
-6. [Contract Tests](#6-contract-tests)
-7. [Plugin Lifecycle](#7-plugin-lifecycle)
+1. [What Plugins Do (And Don't Do)](#1-what-plugins-do-and-dont-do)
+2. [Plugin Architecture](#2-plugin-architecture)
+3. [Shipped Plugins](#3-shipped-plugins)
+4. [Plugin Comparison Matrix](#4-plugin-comparison-matrix)
+5. [Decision Matrix](#5-decision-matrix)
+6. [Plugin Development](#6-plugin-development)
+7. [Contract Tests](#7-contract-tests)
+8. [Plugin Lifecycle](#8-plugin-lifecycle)
 
 ---
 
-## 1. Plugin Architecture
+## 1. What Plugins Do (And Don't Do)
+
+A plugin is a **selection strategy**. It answers one question: given what the caller needs, which provider and model should handle it?
+
+Each plugin brings a different source of intelligence to that decision:
+
+- **DirectPlugin** uses a static model catalog. No network calls, deterministic answers.
+- **MaestroPlugin** adds quality scoring and off-peak pricing awareness.
+- **OpenRouterPlugin** queries openrouter.ai's model catalog API to get live pricing and availability data for 200+ models, then uses that data to make a better-informed local selection.
+- **PortkeyPlugin** queries portkey.ai's catalog (or your self-hosted gateway) for model metadata.
+
+**What plugins do NOT do:**
+
+- Route traffic through their service. The OpenRouter plugin does not send your prompts through OpenRouter.
+- See, modify, or proxy AI requests or responses.
+- Manage API keys for execution. They may use an API key to access a model catalog, but your execution API keys stay with your orchestrator.
+- Make any provider API calls on your behalf (Claude, GPT, Gemini, etc.).
+
+The plugin produces a `ModelSelection`. Your orchestrator takes that selection and makes the actual API call itself, directly to the provider.
+
+---
+
+## 2. Plugin Architecture
 
 Every plugin implements the `RouterPlugin` interface:
 
@@ -39,6 +62,8 @@ interface RouterPlugin {
 }
 ```
 
+The key method is `select()`. It receives a `SpawnIntent` (what you need) and returns a `ModelSelection` (where to send it). That's the entire plugin contract. Everything else -- `models()`, `healthy()`, `initialize()`, `dispose()` -- is lifecycle support.
+
 Plugins are loaded lazily via dynamic `import()`. The `ROUTER_PLUGINS` registry maps plugin IDs to loader functions:
 
 ```typescript
@@ -57,13 +82,15 @@ Only the plugin you configure is loaded. Unused plugins are never imported (tree
 
 ---
 
-## 2. Shipped Plugins
+## 3. Shipped Plugins
 
 ### Direct Plugin
 
 **ID:** `direct` | **Status:** Stable | **API Key:** No
 
-The offline-first, zero-config fallback. Uses a static model catalog with deterministic selection based on effort level. Always healthy, always available. This is the universal last resort.
+**Intelligence source:** Static model catalog compiled into the package at release time.
+
+The zero-config, zero-network fallback. Uses a hardcoded catalog of models with known pricing and capabilities. Selection is fully deterministic based on effort level and cost sensitivity. Always healthy, always available.
 
 **When to use:** Development, testing, air-gapped environments, or as a fallback for any other plugin.
 
@@ -71,10 +98,10 @@ The offline-first, zero-config fallback. Uses a static model catalog with determ
 - `cost_sensitivity: 'high'` -- cheapest qualifying model
 - Otherwise -- effort-based tier ordering (deep: Opus/GPT-5, standard: Sonnet/Gemini Pro, minimal: Haiku/Flash)
 
-**Limitations:**
-- No live model discovery
+**Trade-offs:**
+- No live data -- pricing and model availability may be stale between releases
 - No provider-specific optimizations
-- Static pricing data (updated at release time)
+- The simplest and most reliable plugin, by design
 
 ---
 
@@ -82,17 +109,20 @@ The offline-first, zero-config fallback. Uses a static model catalog with determ
 
 **ID:** `maestro` | **Status:** Stable | **API Key:** No
 
-Quality-informed routing with score bridge integration. Computes a composite score weighting quality and cost based on `cost_sensitivity`. Supports off-peak pricing optimization.
+**Intelligence source:** Static catalog + quality scores from `@maestro/score` bridge + off-peak pricing windows.
+
+Computes a composite score that weights quality and cost based on `cost_sensitivity`. During off-peak windows (provider-specific time ranges), effective costs are reduced, shifting the cost-quality balance toward models that are temporarily cheaper.
 
 **When to use:** Production deployments where cost-quality tradeoff matters and you want score-driven model selection.
 
-**Unique features:**
+**How it decides:**
 - Composite score: `(quality_weight * quality) - (cost_weight * normalized_cost)`
-- Off-peak pricing: provider-specific time windows reduce effective cost
-- Score bridge integration: reads quality data from `@maestro/score` (optional)
+- Off-peak pricing: provider-specific UTC time windows reduce effective cost
+- Score bridge: reads quality data from `@maestro/score` if available, falls back to static defaults
 
-**Limitations:**
+**Trade-offs:**
 - Quality scores are static by default (StaticScoreBridge). Real-time quality requires implementing a custom ScoreBridge.
+- No live model discovery -- uses the same static catalog as DirectPlugin, augmented with scoring
 
 ---
 
@@ -100,19 +130,22 @@ Quality-informed routing with score bridge integration. Computes a composite sco
 
 **ID:** `openrouter` | **Status:** Stable | **API Key:** Yes
 
-Multi-provider aggregator via [openrouter.ai](https://openrouter.ai). Aggregates 200+ models from dozens of providers behind a single API key. Live model discovery with 5-minute cache TTL.
+**Intelligence source:** Live model catalog from [openrouter.ai](https://openrouter.ai)'s `/models` API endpoint, cached for 5 minutes.
 
-**When to use:** You want access to many providers without managing individual API keys.
+Queries OpenRouter's public model catalog API to get up-to-date pricing, availability, and capability data for 200+ models across dozens of providers. This data is used locally to make better-informed selection decisions. **The plugin does not route your AI traffic through OpenRouter** -- it only reads their catalog to know what's available and how much it costs right now.
 
-**Unique features:**
-- Live model discovery via `/models` API endpoint
-- Automatic model catalog parsing with capability inference
-- Cache coalescing (concurrent `models()` calls share one HTTP request)
+**When to use:** You want the freshest pricing and availability data across many providers, updated in near-real-time as providers change pricing or add models.
 
-**Limitations:**
-- Requires API key
-- Depends on OpenRouter's availability
-- Pricing includes OpenRouter's markup (currently 0%)
+**How it works:**
+1. On first `select()` or `models()` call, fetches the model catalog from OpenRouter's API
+2. Parses model entries, infers capabilities, extracts pricing
+3. Caches the result for 5 minutes (cache coalescing prevents stampedes)
+4. Uses this enriched catalog for selection, just like DirectPlugin uses its static catalog
+
+**Trade-offs:**
+- Requires an OpenRouter API key (for catalog access)
+- Depends on OpenRouter's API availability (falls back to static catalog on failure)
+- Pricing data includes OpenRouter's markup (currently 0%)
 
 ---
 
@@ -120,17 +153,20 @@ Multi-provider aggregator via [openrouter.ai](https://openrouter.ai). Aggregates
 
 **ID:** `requesty` | **Status:** Stable | **API Key:** Yes
 
-Smart routing via [requesty.ai](https://requesty.ai) with sub-20ms failover between providers.
+**Intelligence source:** Live model catalog from [requesty.ai](https://requesty.ai), cached with coalescing.
 
-**When to use:** Latency-sensitive applications where fast failover matters.
+Queries Requesty's API for model availability and pricing data. Like the OpenRouter plugin, this is catalog intelligence only -- **your AI traffic does not flow through Requesty**.
 
-**Unique features:**
-- Sub-20ms provider failover
-- Intelligent load balancing
+**When to use:** Teams that use Requesty's infrastructure and want selection decisions informed by Requesty's view of model availability and failover state.
 
-**Limitations:**
+**How it works:**
+- Fetches model catalog from Requesty's API
+- Uses Requesty's availability signals to inform selection
+- Falls back to static catalog if the API is unreachable
+
+**Trade-offs:**
 - Requires API key
-- Currently uses static model catalog (live discovery validates availability only)
+- Currently uses static model catalog as primary (live discovery validates availability only)
 
 ---
 
@@ -138,18 +174,20 @@ Smart routing via [requesty.ai](https://requesty.ai) with sub-20ms failover betw
 
 **ID:** `portkey` | **Status:** Stable | **API Key:** Yes
 
-Open-source AI gateway via [portkey.ai](https://portkey.ai). 250+ models, 45+ providers. Supports self-hosted deployment for data sovereignty.
+**Intelligence source:** Model catalog from [portkey.ai](https://portkey.ai) or your self-hosted Portkey gateway.
 
-**When to use:** Enterprise environments requiring self-hosted gateways, or teams that need Portkey's guardrails and canary deployment features.
+Queries Portkey's API for model catalog data. Supports self-hosted deployments -- point `base_url` at your own gateway to keep catalog queries inside your network. **The plugin queries your Portkey instance for catalog data; it does not proxy AI requests through Portkey** (though you may separately choose to use Portkey as an execution gateway -- that's your orchestrator's concern).
 
-**Unique features:**
-- Self-hosted option (set `base_url` to your gateway)
-- Virtual key support for team-level key management
-- Portkey-specific headers (`x-portkey-api-key`, `x-portkey-virtual-key`)
+**When to use:** Enterprise environments with self-hosted Portkey gateways, or teams using Portkey's virtual key management.
 
-**Limitations:**
-- Requires API key (even self-hosted)
-- Currently uses static model catalog
+**How it works:**
+- Queries Portkey's model catalog endpoint with appropriate headers
+- Supports virtual keys for team-level catalog isolation
+- Falls back to static catalog on failure
+
+**Trade-offs:**
+- Requires API key (even self-hosted instances)
+- Currently uses static model catalog as primary
 
 ---
 
@@ -157,19 +195,21 @@ Open-source AI gateway via [portkey.ai](https://portkey.ai). 250+ models, 45+ pr
 
 **ID:** `litellm` | **Status:** Stable | **API Key:** Proxy mode
 
-Universal gateway via [LiteLLM](https://github.com/BerriAI/litellm). 2500+ models, 100+ providers. OpenAI-compatible interface. Operates in proxy or SDK mode.
+**Intelligence source:** Model catalog from a [LiteLLM](https://github.com/BerriAI/litellm) proxy server or in-process SDK.
 
-**When to use:** Teams already running a LiteLLM proxy, or those wanting the broadest model coverage.
+Queries your LiteLLM proxy for its model list and pricing data. LiteLLM supports 2500+ models across 100+ providers, so this plugin gives the broadest catalog. **The plugin queries your LiteLLM instance for catalog data; it does not send AI requests through LiteLLM** (your orchestrator may use LiteLLM as an execution proxy separately).
 
-**Unique features:**
-- Dual mode: proxy (HTTP to LiteLLM server) or SDK (in-process, requires Python)
-- Broadest model support (2500+ models)
-- OpenAI-compatible API format
+**When to use:** Teams already running a LiteLLM proxy, or those wanting the broadest model coverage for selection intelligence.
 
-**Limitations:**
+**How it works:**
+- Proxy mode: HTTP requests to your LiteLLM server's model list endpoint
+- SDK mode: in-process catalog access (requires Python runtime)
+- Falls back to static catalog on failure
+
+**Trade-offs:**
 - Proxy mode requires a running LiteLLM server
 - SDK mode requires Python runtime
-- Currently uses static model catalog
+- Currently uses static model catalog as primary
 
 ---
 
@@ -177,11 +217,13 @@ Universal gateway via [LiteLLM](https://github.com/BerriAI/litellm). 2500+ model
 
 **ID:** `mock` | **Status:** Stable | **API Key:** No
 
-Deterministic test router with pre-configured responses, call tracking, and failure simulation.
+**Intelligence source:** Pre-configured test data that you control.
+
+Deterministic test plugin with pre-configured responses, call tracking, and failure simulation. Returns exactly what you tell it to -- nothing more, nothing less.
 
 **When to use:** Unit tests, integration tests, and CI pipelines.
 
-**Unique features:**
+**Test helpers:**
 - `setResponse(effort, selection)` -- configure what `select()` returns
 - `getCalls()` -- inspect all intents that were routed
 - `clearCalls()` -- reset call history
@@ -190,7 +232,7 @@ Deterministic test router with pre-configured responses, call tracking, and fail
 
 ---
 
-## 3. Plugin Comparison Matrix
+## 4. Plugin Comparison Matrix
 
 | Feature | Direct | Maestro | OpenRouter | Requesty | Portkey | LiteLLM |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -206,7 +248,7 @@ Deterministic test router with pre-configured responses, call tracking, and fail
 
 ---
 
-## 4. Decision Matrix
+## 5. Decision Matrix
 
 | Scenario | Recommended Plugin | Fallback | Rationale |
 |:---|:---|:---|:---|
@@ -221,7 +263,7 @@ Deterministic test router with pre-configured responses, call tracking, and fail
 
 ---
 
-## 5. Plugin Development
+## 6. Plugin Development
 
 ### Step-by-Step
 
@@ -336,7 +378,7 @@ npx vitest run src/__tests__/contract/
 
 ---
 
-## 6. Contract Tests
+## 7. Contract Tests
 
 The contract test suite (`src/__tests__/contract/router-contract.test.ts`) validates every plugin against a standard set of behavioral requirements. All shipped plugins pass this suite, and custom plugins should too.
 
@@ -352,7 +394,7 @@ The contract test suite (`src/__tests__/contract/router-contract.test.ts`) valid
 
 ---
 
-## 7. Plugin Lifecycle
+## 8. Plugin Lifecycle
 
 ```
   register/load
