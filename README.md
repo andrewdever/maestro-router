@@ -9,6 +9,19 @@
 
 Receives a `SpawnIntent` from the orchestrator and resolves it to a concrete `ModelSelection` through a five-part chain: **router - provider - harness - model - config**. Self-contained with zero dependencies on the rest of the Maestro platform -- publish and use it standalone.
 
+## Documentation
+
+| Document | Description |
+|:---|:---|
+| [README.md](./README.md) | Overview, quick start, and feature guide (this file) |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, PR process, roadmap, known debt |
+| [docs/API.md](./docs/API.md) | Complete API reference for all exported classes and functions |
+| [docs/CONFIGURATION.md](./docs/CONFIGURATION.md) | Full configuration guide with presets and examples |
+| [docs/PLUGINS.md](./docs/PLUGINS.md) | Plugin guide, comparison matrix, and development walkthrough |
+| [docs/SECURITY.md](./docs/SECURITY.md) | Security architecture, threat model, defense layers, incident response |
+| [CHANGELOG.md](./CHANGELOG.md) | Release history |
+| [TypeDoc API](https://andrewdever.github.io/maestro-router) | Generated API reference (GitHub Pages) |
+
 ---
 
 ## Features
